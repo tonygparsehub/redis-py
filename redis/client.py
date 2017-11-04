@@ -232,6 +232,33 @@ def int_or_none(response):
     return int(response)
 
 
+def stream_key(response):
+    return response
+
+
+def stream_list(response):
+    if response is None:
+        return None
+    result = []
+    for r in response:
+        kv_pairs = r[1]
+        kv_dict = dict()
+        while len(kv_pairs) > 1:
+            kv_dict[kv_pairs.pop()] = kv_pairs.pop()
+        result.append((r[0], kv_dict))
+
+    return result
+
+
+def multi_stream_list(response):
+    if response is None:
+        return None
+    result = dict()
+    for r in response:
+        result[r[0].decode('utf-8')] = stream_list(r[1])
+    return result
+
+
 def float_or_none(response):
     if response is None:
         return None
@@ -369,6 +396,9 @@ class StrictRedis(object):
             'GEOADD',
             int
         ),
+        string_keys_to_dict('XADD', stream_key),
+        string_keys_to_dict('XRANGE', stream_list),
+        string_keys_to_dict('XREAD', multi_stream_list),
         string_keys_to_dict(
             'INCRBYFLOAT HINCRBYFLOAT GEODIST',
             float
@@ -1674,6 +1704,88 @@ class StrictRedis(object):
         """
         args = list_or_args(keys, args)
         return self.execute_command('SUNIONSTORE', dest, *args)
+
+    # STREAMS COMMANDS
+    def xadd(self, _name, id='*', maxlen=None, approximate=True, **kwargs):
+        """
+        Add to a stream.
+        _name: name of the stream (not using 'name' as this would
+               prevent 'name' used in the kwargs
+        id: Location to insert this record. By default it is appended.
+        maxlen: truncate old stream members beyond this size
+        approximate: actual stream length may be slightly more than maxlen
+        **kwargs: key/value pairs to insert into the stream
+
+        """
+        pieces = []
+        if maxlen is not None:
+            if not isinstance(maxlen, int) or maxlen < 1:
+                raise RedisError("XADD maxlen must be a positive integer")
+            pieces.append("MAXLEN")
+            if approximate:
+                pieces.append("~")
+            pieces.append(str(maxlen))
+        pieces.append(id)
+        for pair in iteritems(kwargs):
+            pieces.append(pair[0])
+            pieces.append(pair[1])
+        return self.execute_command('XADD', _name, *pieces)
+
+    def xrange(self, name, start='-', finish='+', count=None):
+        """
+        Read stream values within an interval.
+        name: name of the stream
+        start: first stream ID. defaults to '-', meaning the earliest available
+        finish: last stream ID. defaults to '+', meaning the latest available.
+        count: if set, only return this many items, beginning with the
+               earliest available.
+        """
+        pieces = [start, finish]
+        if count is not None:
+            if not isinstance(count, int) or count < 1:
+                raise RedisError("XRANGE count must be a positive integer")
+            pieces.append("COUNT")
+            pieces.append(str(count))
+
+        return self.execute_command('XRANGE', name, *pieces)
+
+    def xread(self, *full_streams, **kwargs):
+        """
+        Block and monitor multiple streams for new data.
+        count: if set, only return this many items, beginning with the
+               earliest available.
+        block: number of milliseconds to wait, if nothing already present
+        full_streams: a list of stream names to monitor for new activity,
+                      ignoring any pre-existing data in the streams.
+        **partial_streams: a mapping of stream names to stream IDs, where
+                         where IDs indicate the last ID already seen
+        """
+        block = kwargs.pop('block', None)
+        count = kwargs.pop('count', None)
+        partial_streams = kwargs
+        pieces = []
+        if block is not None:
+            if not isinstance(block, int) or block < 1:
+                raise RedisError("XREAD block must be a positive integer")
+            pieces.append("BLOCK")
+            pieces.append(str(block))
+        if count is not None:
+            if not isinstance(count, int) or count < 1:
+                raise RedisError("XREAD count must be a positive integer")
+            pieces.append("COUNT")
+            pieces.append(str(count))
+
+        pieces.append("STREAMS")
+        ids = []
+        for stream in full_streams:
+            pieces.append(stream)
+            ids.append('$')
+        for partial_stream in iteritems(partial_streams):
+            pieces.append(partial_stream[0])
+            ids.append(partial_stream[1])
+
+        pieces.extend(ids)
+        return self.execute_command('XREAD', *pieces)
 
     # SORTED SET COMMANDS
     def zadd(self, name, *args, **kwargs):
